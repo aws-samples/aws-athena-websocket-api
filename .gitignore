@@ -1,0 +1,6 @@
+# Generated Files
+output
+resources/.DS_Store
+.aws-sam
+package.yaml
+sam-package-output.yaml

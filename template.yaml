@@ -1,0 +1,445 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  simple-websockets-athena-access
+  SAM Template for athena-websockets-query-app that has the DynamoDB table and Lambda functions needed to demonstrate the Websocket protocol on API Gateway.
+Parameters:
+  pAthenaWorkgroupName:
+    Type: String
+    Description: "Athena Workgroup Name"
+    Default: "primary"
+  pGlueDatabaseName:
+    Type: String
+    Default: "covid-19"
+  pBucketName:
+    Type: String
+  TableName:
+    Type: String
+    Default: websocket_connections
+    Description: (Required) The name of the new DynamoDB to store connection identifiers for each connected clients. Minimum 3 characters
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[A-Za-z_]+$
+    ConstraintDescription: Required. Can be characters and underscore only. No numbers or special characters allowed.
+Resources:
+  AthenaQueryWebSocket:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: AthenaQueryWebSocket
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      RouteKey: $connect
+      AuthorizationType: NONE
+      OperationName: ConnectRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: ConnectInteg
+  ConnectInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      Description: Connect Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnConnectFunction.Arn}/invocations
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      OperationName: DisconnectRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: DisconnectInteg
+  DisconnectInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      Description: Disconnect Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnDisconnectFunction.Arn}/invocations
+  QueryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      RouteKey: runquery
+      AuthorizationType: NONE
+      OperationName: QueryRoute
+      Target:
+        Fn::Join:
+        - /
+        - - integrations
+          - Ref: QueryInteg
+  QueryInteg:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+      Description: Send Integration
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RunQueryFunction.Arn}/invocations
+  Deployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+    - ConnectRoute
+    - QueryRoute
+    - DisconnectRoute
+    Properties:
+      ApiId:
+        Ref: AthenaQueryWebSocket
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName: Prod
+      Description: Prod Stage
+      DeploymentId:
+        Ref: Deployment
+      ApiId:
+        Ref: AthenaQueryWebSocket
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: connectionId
+        AttributeType: S
+      KeySchema:
+      - AttributeName: connectionId
+        KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      SSESpecification:
+        SSEEnabled: true
+      TableName:
+        Ref: TableName
+  OnConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lib/lambda_connect/
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs16.x
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+  OnConnectPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - AthenaQueryWebSocket
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: OnConnectFunction
+      Principal: apigateway.amazonaws.com
+  OnDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lib/lambda_disconnect/
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs16.x
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+  OnDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - AthenaQueryWebSocket
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: OnDisconnectFunction
+      Principal: apigateway.amazonaws.com
+  ######## ATHENA RESOURCE REQUIREMENTS ########
+  MyAthenaRolePolicy: 
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties: 
+      ManagedPolicyName: "LambdaFunctionAthenaDataAccessPolicy"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+        - Sid: VisualEditor0
+          Effect: Allow
+          Action:
+          - glue:GetDatabase
+          - glue:GetTables
+          - glue:GetTable
+          Resource:
+          - !Sub 'arn:aws:glue:*:${AWS::AccountId}:catalog'
+          - !Sub 'arn:aws:glue:*:${AWS::AccountId}:tableVersion/*/*/*'
+          - !Sub 'arn:aws:glue:*:${AWS::AccountId}:database/${pGlueDatabaseName}'
+          - !Sub 'arn:aws:glue:*:${AWS::AccountId}:table/${pGlueDatabaseName}/*'
+        - Sid: VisualEditor1
+          Effect: Allow
+          Action:
+          - athena:GetWorkGroup
+          - athena:StartQueryExecution
+          - athena:CancelQueryExecution
+          - athena:StopQueryExecution
+          - athena:GetQueryExecution
+          - athena:GetQueryResults
+          - athena:ListDataCatalogs
+          - athena:ListWorkGroups
+          Resource:
+          - !Sub 'arn:aws:athena:*:${AWS::AccountId}:datacatalog/*'
+          - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${pAthenaWorkgroupName}'
+        - Sid: VisualEditor2
+          Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:ListBucket
+          - s3:GetBucketLocation
+          Resource:
+          - !Sub 'arn:aws:s3:::${pBucketName}/*'
+          - !Sub 'arn:aws:s3:::${pBucketName}'
+          - !Sub 'arn:aws:s3:::covid19-lake/*'
+          - !Sub 'arn:aws:s3:::covid19-lake'
+        - Sid: VisualEditor3
+          Effect: Allow
+          Action: 
+          - kms:Decrypt
+          - kms:Encrypt
+          - kms:DescribeKey
+          Resource:
+          - arn:aws:kms:*:*:alias/*
+          - arn:aws:kms:*:*:key/*
+  
+  RunQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lib/lambda_run_query/
+      Handler: app.handler
+      Runtime: python3.9
+      MemorySize: 576
+      Timeout: 60
+      Environment:
+        Variables:
+          pRegion: !Sub ${AWS::Region}
+          pBucketName: !Sub ${pBucketName}
+          pStepARN: !Ref StateMachine
+          pOutputDir: "athena_api_access_results"
+          pWorkGroup: !Ref pAthenaWorkgroupName
+          pDatabase: !Ref pGlueDatabaseName
+      Policies:
+        - !Ref MyAthenaRolePolicy
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableName
+        - Statement:
+          - Effect: Allow
+            Action:
+            - execute-api:ManageConnections
+            Resource:
+            - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AthenaQueryWebSocket}/*
+          - Effect: Allow
+            Action:
+            - states:StartExecution
+            Resource:
+            - Ref: StateMachine
+  RunQueryPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - AthenaQueryWebSocket
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: RunQueryFunction
+      Principal: apigateway.amazonaws.com
+  PreSignerFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: lib/lambda_presigner_return/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      MemorySize: 576
+      Timeout: 600
+      Environment:
+        Variables:
+          pRegion: !Sub ${AWS::Region}
+          pDynamoTableName: !Ref TableName
+      Policies:
+        - !Ref MyAthenaRolePolicy
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableName
+        - Statement:
+          - Effect: Allow
+            Action:
+            - execute-api:ManageConnections
+            Resource:
+            - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AthenaQueryWebSocket}/*
+      Tags:
+        {
+        "AccountID": !Sub '${AWS::AccountId}',
+        "DataClassification": "Internal"
+        }
+  
+  ######## STATE MACHINE #########
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub athena-api-states-execution
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+      Policies:
+        - PolicyName: !Sub athena-api-states-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt PreSignerFunction.Arn
+              - Effect: Allow
+                Action:
+                  - states:DescribeStateMachine
+                  - states:DescribeStateMachineForExecution
+                  - states:StartExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - events:DescribeRule
+                  - events:PutRule
+                  - events:PutTargets
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule
+              - Effect: Allow
+                Action:
+                  - elasticmapreduce:DescribeCluster
+                  - elasticmapreduce:RunJobFlow
+                  - elasticmapreduce:TerminateJobFlows
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticmapreduce:AddJobFlowSteps
+                  - elasticmapreduce:CancelSteps
+                  - elasticmapreduce:DescribeStep
+                  - elasticmapreduce:ListInstanceFleets
+                  - elasticmapreduce:ListInstanceGroups
+                  - elasticmapreduce:ModifyInstanceFleet
+                  - elasticmapreduce:ModifyInstanceGroups
+                  - elasticmapreduce:SetTerminationProtection
+                Resource: !Sub arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:cluster/*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/EMR*
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:PutRolePolicy
+                  - iam:UpdateRoleDescription
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/elasticmapreduce.amazonaws.com/AWSServiceRoleForEMRCleanup*
+                Condition:
+                  StringLike:
+                    iam:AWSServiceName: elasticmapreduce.amazonaws.com
+
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn: [PreSignerFunction, SNSTopic]
+    Properties:
+      Name: !Sub athena-api-get-pre-signer
+      DefinitionUri: lib/state-machine/stage-a.asl.json
+      DefinitionSubstitutions:
+        lStep1: !GetAtt PreSignerFunction.Arn
+        lsns: !Ref SNSTopic
+      Role: !GetAtt StatesExecutionRole.Arn
+  ######## SNS #########
+  SNSTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: athena-api-notifications
+
+  SNSTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        PolicyDocument:
+          Id: athena-api-notifications-policy
+          Version: 2012-10-17
+          Statement:
+            - Sid: athena-api-notifications
+              Effect: Allow
+              Principal:
+                Service:
+                  - cloudwatch.amazonaws.com
+                  - events.amazonaws.com
+              Action: sns:Publish
+              Resource: !Ref SNSTopic
+        Topics:
+          - !Ref SNSTopic
+
+Outputs:
+  ConnectionsTableArn:
+    Description: Connections table ARN
+    Value:
+      Fn::GetAtt:
+      - ConnectionsTable
+      - Arn
+  OnConnectFunctionArn:
+    Description: OnConnect function ARN
+    Value:
+      Fn::GetAtt:
+      - OnConnectFunction
+      - Arn
+  OnDisconnectFunctionArn:
+    Description: OnDisconnect function ARN
+    Value:
+      Fn::GetAtt:
+      - OnDisconnectFunction
+      - Arn
+  RunQueryFunctionArn:
+    Description: SendMessage function ARN
+    Value:
+      Fn::GetAtt:
+      - RunQueryFunction
+      - Arn
+  WebSocketURI:
+    Description: The WSS Protocol URI to connect to
+    Value:
+      Fn::Join:
+      - ''
+      - - wss://
+        - Ref: AthenaQueryWebSocket
+        - .execute-api.
+        - Ref: AWS::Region
+        - .amazonaws.com/
+        - Ref: Stage

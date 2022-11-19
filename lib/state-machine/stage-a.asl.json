@@ -1,0 +1,83 @@
+{
+  "Comment": "Simple pseudo flow",
+  "StartAt": "Try",
+  "States": {
+    "Try": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Get Job status",
+          "States": {
+            "Get Job status": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::athena:getQueryExecution",
+              "Parameters": {
+                "QueryExecutionId.$": "$.QueryExecution.QueryExecutionId"
+              },
+              "ResultPath": "$.body.job",
+              "Next": "Did Job finish?"
+            },
+            "Wait": {
+              "Type": "Wait",
+              "Seconds": 1,
+              "Next": "Get Job status"
+            },
+            "Did Job finish?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.body.job.QueryExecution.Status.State",
+                  "StringEquals": "SUCCEEDED",
+                  "Next": "Get pre-signer"
+                },
+                {
+                  "Variable": "$.body.job.QueryExecution.Status.State",
+                  "StringEquals": "FAILED",
+                  "Next": "Job Failed"
+                }
+              ],
+              "Default": "Wait"
+            },
+            "Job Failed": {
+              "Type": "Fail",
+              "Error": "Job Failed",
+              "Cause": "Job failed, please check the logs"
+            },
+            "Get pre-signer": {
+              "Type": "Task",
+              "Resource": "${lStep1}",
+              "ResultPath": "$.response",
+              "End": true
+            }
+          }
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": null,
+          "Next": "Error"
+        }
+      ],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "Error": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${lsns}",
+        "Message.$": "$.QueryExecution.QueryExecutionId",
+        "Subject.$": "States.Format('Athena API job failed for connection id {}', $.ConnectionId)"
+      },
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail"
+    }
+  }
+}
